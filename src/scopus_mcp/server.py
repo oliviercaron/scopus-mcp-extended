@@ -516,6 +516,21 @@ async def handle_list_tools() -> list[types.Tool]:
             }
         ),
         types.Tool(
+            name="check_capabilities",
+            description=(
+                "Probe the Elsevier API once to discover what your specific "
+                "API key + insttoken combination can actually do. Runs ~6 "
+                "lightweight requests across endpoint families and returns a "
+                "structured report: which probes succeeded, which were blocked "
+                "by access control, plus a list of MCP tools likely to work "
+                "vs likely to fail. Result is memoized for the session, so "
+                "repeated calls are free. Recommended as the FIRST call when "
+                "starting a new session — saves wasted attempts on tools your "
+                "subscription doesn't include."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        types.Tool(
             name="check_article_access",
             description=(
                 "Quickly check whether your API key + insttoken grants "
@@ -805,12 +820,16 @@ async def _h_search_sciencedirect(args: Dict[str, Any]) -> List[types.TextConten
 
 @_handler("get_article")
 async def _h_get_article(args: Dict[str, Any]) -> List[types.TextContent]:
+    view = args.get("view", "META_ABS")
     raw = await client.get_article(
         _require("value", args),
         identifier=args.get("identifier", "doi"),
-        view=args.get("view", "META_ABS"),
+        view=view,
     )
-    return _text(clean_article_retrieval(raw))
+    cleaned = clean_article_retrieval(raw)
+    # Inject _meta so the agent knows which view was used and can interpret
+    # missing fields correctly (e.g. body text only present in FULL view).
+    return _text({"_meta": {"view_used": view}, **cleaned})
 
 
 @_handler("get_objects")
@@ -835,6 +854,12 @@ async def _h_get_embase_record(args: Dict[str, Any]) -> List[types.TextContent]:
         _require("value", args), identifier=args.get("identifier", "doi")
     )
     return _text(clean_embase_record(raw))
+
+
+@_handler("check_capabilities")
+async def _h_check_capabilities(args: Dict[str, Any]) -> List[types.TextContent]:
+    result = await client.check_capabilities()
+    return _text(result)
 
 
 @_handler("check_article_access")

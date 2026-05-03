@@ -142,19 +142,27 @@ def clean_search_results(data: Dict[str, Any]) -> List[Dict[str, Any]]:
     return cleaned
 
 
+_EMPTY_ABSTRACT = {
+    "scopus_id": None, "doi": None, "title": None, "description": None,
+    "publication_name": None, "cover_date": None, "cited_by_count": None,
+    "authors": [], "url": None,
+}
+
+
 def clean_abstract_details(data: Dict[str, Any]) -> Dict[str, Any]:
     """Project the Abstract Retrieval API response into a flat dict.
 
     Tries both ``abstracts-retrieval-response`` and the older singular
-    ``abstract-retrieval-response`` wrapper. Returns ``{}`` when neither
-    is present.
+    ``abstract-retrieval-response`` wrapper. Returns the full shape with
+    ``None`` defaults when neither is present (so consumers can rely on
+    every key existing).
     """
     root = (
         _pick(data, "abstracts-retrieval-response")
         or _pick(data, "abstract-retrieval-response")
     )
     if not isinstance(root, dict):
-        return {}
+        return dict(_EMPTY_ABSTRACT)
 
     coredata = _pick(root, "coredata", default={}) or {}
 
@@ -182,17 +190,27 @@ def clean_abstract_details(data: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+_EMPTY_AUTHOR_PROFILE = {
+    "author_id": None, "orcid": None, "document_count": None,
+    "cited_by_count": None, "citation_count": None,
+    "name": {"surname": None, "given_name": None, "initials": None},
+    "current_affiliation": None, "url": None,
+}
+
+
 def clean_author_profile(data: Dict[str, Any]) -> Dict[str, Any]:
     """Project the Author Retrieval API response into a flat author profile.
 
     Scopus wraps the response in a single-element list in modern versions,
-    a bare dict in older ones — we accept both shapes.
+    a bare dict in older ones — we accept both shapes. Returns the full
+    shape with ``None`` defaults when no profile data is present.
     """
     root = _pick(data, "author-retrieval-response")
     if isinstance(root, list):
         root = next(iter(root), None)
     if not isinstance(root, dict):
-        return {}
+        return {k: (dict(v) if isinstance(v, dict) else v)
+                for k, v in _EMPTY_AUTHOR_PROFILE.items()}
 
     coredata = _pick(root, "coredata", default={}) or {}
     profile  = _pick(root, "author-profile", default={}) or {}
@@ -230,11 +248,21 @@ def clean_affiliation_search(data: Dict[str, Any]) -> List[Dict[str, Any]]:
     ]
 
 
+_EMPTY_AFFILIATION = {
+    "affiliation_id": None, "name": None, "document_count": None,
+    "city": None, "country": None, "org_type": None, "url": None,
+}
+
+
 def clean_affiliation_details(data: Dict[str, Any]) -> Dict[str, Any]:
-    """Project the Affiliation Retrieval response into one dict."""
+    """Project the Affiliation Retrieval response into one dict.
+
+    Returns the full shape with ``None`` defaults when no profile data is
+    present.
+    """
     root = _pick(data, "affiliation-retrieval-response")
     if not isinstance(root, dict):
-        return {}
+        return dict(_EMPTY_AFFILIATION)
 
     coredata    = _pick(root, "coredata", default={}) or {}
     institution = _pick(root, "institution-profile", default={}) or {}
@@ -283,10 +311,11 @@ def clean_citations_overview(data: Dict[str, Any]) -> Dict[str, Any]:
 
     The Elsevier shape is two parallel arrays under deeply-nested wrapper
     nodes: a header row of years and a data row of counts. We zip them.
+    Returns the full shape with empty defaults when no payload is present.
     """
     root = _pick(data, "abstract-citations-response")
     if not isinstance(root, dict):
-        return {}
+        return {"citations_by_year": {}, "total": 0}
 
     year_headers = _as_list(_pick(root, "citeColumnTotalXML", "citeColumnTotal", "cc"))
     matrix_rows  = _as_list(_pick(root, "citeInfoMatrix", "citeInfoMatrixXML", "citationMatrix", "cc"))
@@ -332,13 +361,22 @@ def _project_journal(entry: Dict[str, Any]) -> Dict[str, Any]:
 _clean_single_journal = _project_journal
 
 
+_EMPTY_JOURNAL = {
+    "title": None, "issn": None, "eissn": None, "publisher": None,
+    "subject_areas": [], "snip": None, "sjr": None, "cite_score": None,
+    "open_access": None,
+}
+
+
 def clean_journal_metadata(data: Dict[str, Any]) -> Dict[str, Any]:
-    """Single-journal lookup by ISSN — returns the first entry, or ``{}``."""
+    """Single-journal lookup by ISSN — returns the first entry, or the
+    empty-shape dict (all keys present, ``None`` defaults) when no match.
+    """
     entries = _as_list(_pick(data, "serial-metadata-response", "entry"))
     if not entries:
-        return {}
+        return dict(_EMPTY_JOURNAL)
     first = entries[0]
-    return _project_journal(first) if isinstance(first, dict) else {}
+    return _project_journal(first) if isinstance(first, dict) else dict(_EMPTY_JOURNAL)
 
 
 def clean_journal_search(data: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -433,9 +471,12 @@ def clean_plumx_metrics(data: Dict[str, Any]) -> Dict[str, Any]:
           'totals': {category_name: total_count, ...},
           'breakdown': {category_name: {count_type: total, ...}, ...}
         }
+
+    Returns the full shape with empty defaults when no data is present
+    so consumers can rely on every key existing.
     """
     if not data:
-        return {}
+        return {"id_type": None, "id_value": None, "totals": {}, "breakdown": {}}
     totals: Dict[str, int] = {}
     breakdown: Dict[str, Dict[str, int]] = {}
     for cat in data.get('count_categories', []) or []:
@@ -499,14 +540,24 @@ def clean_sciencedirect_search(data: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+_EMPTY_ARTICLE = {
+    "doi": None, "eid": None, "pii": None, "title": None, "creator": None,
+    "publication_name": None, "cover_date": None, "volume": None,
+    "issue": None, "page_range": None, "abstract": None, "open_access": None,
+    "aggregation_type": None, "has_full_text": False, "full_text_length": 0,
+    "full_text_snippet": "", "url": None,
+}
+
+
 def clean_article_retrieval(data: Dict[str, Any]) -> Dict[str, Any]:
     """
     Extracts core metadata from the ScienceDirect Article Retrieval response.
     Returns coredata + a snippet of the original text when 'FULL' view was used.
+    Returns the full shape with defaults when no payload is present.
     """
     root = data.get('full-text-retrieval-response') or {}
     if not root:
-        return {}
+        return dict(_EMPTY_ARTICLE)
     core = root.get('coredata', {}) or {}
     # 'originalText' present when view=FULL
     original_text = root.get('originalText')
@@ -575,6 +626,9 @@ def clean_entitlement(data: Dict[str, Any]) -> Dict[str, Any]:
     Flattens the Article Entitlement response (when accessible) into a
     simple yes/no + identifier echo.
     Shape: {'entitlement-response': {'document-entitlement': [{'@status': 'ENTITLED', ...}]}}
+
+    Always returns ``{'documents': [...]}`` for shape consistency — the
+    list is empty when no documents were returned.
     """
     root = data.get('entitlement-response') or {}
     docs = root.get('document-entitlement') or []
@@ -589,7 +643,7 @@ def clean_entitlement(data: Dict[str, Any]) -> Dict[str, Any]:
             'pii': d.get('pii', ''),
             'message': d.get('message', ''),
         })
-    return {'documents': cleaned} if cleaned else data
+    return {'documents': cleaned}
 
 
 def clean_citation_count(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -659,11 +713,18 @@ def clean_holdings_report(data: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+_EMPTY_EMBASE = {
+    "embase_id": None, "doi": None, "pubmed_id": None,
+    "title": None, "publication_year": None, "raw": {},
+}
+
+
 def clean_embase_record(data: Dict[str, Any]) -> Dict[str, Any]:
     """
     Flattens the Embase Article Retrieval response. Embase records have a
     different schema from Scopus abstracts; we surface the most useful
-    bibliographic fields and return the rest as `raw`.
+    bibliographic fields and return the rest as `raw`. Returns the full
+    shape with ``None`` defaults when no payload is present.
     """
     root = (
         data.get('embase-retrieval-response')
@@ -671,7 +732,7 @@ def clean_embase_record(data: Dict[str, Any]) -> Dict[str, Any]:
         or {}
     )
     if not root:
-        return {}
+        return dict(_EMPTY_EMBASE)
     item = root.get('item') or root
     bib = item.get('bibrecord') or {}
     head = bib.get('head') or {}

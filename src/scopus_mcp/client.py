@@ -60,6 +60,36 @@ class _RetryPolicy:
 _DEFAULT_RETRY = _RetryPolicy()
 
 
+# Mapping of probe label → list of MCP tool names that share its access
+# requirements. Used by check_capabilities() to translate raw probe results
+# into a "what works / what doesn't" view at the tool granularity.
+_PROBE_TO_TOOLS = {
+    "scopus_search":      ["search_scopus", "search_journals", "get_journal_by_issn",
+                           "get_quota_status", "get_bibtex"],
+    "author_search":      ["search_authors", "search_affiliations",
+                           "get_author_profile", "get_affiliation",
+                           "get_author_coauthors"],
+    "abstract_retrieval": ["get_abstract_details", "get_abstract_by_doi",
+                           "get_abstract_references"],
+    "plumx_metrics":      ["get_plumx_metrics"],
+    "citation_overview":  ["get_citations_overview", "get_citation_count",
+                           "get_citing_papers"],
+    "embase_retrieval":   ["get_embase_record"],
+}
+
+
+def _tools_for_probes(results: Dict[str, Dict[str, Any]], success: bool) -> list:
+    """Map probe results back to MCP tool names that share each probe's
+    access requirements. ``success=True`` returns tools we expect to work;
+    ``success=False`` returns tools we expect to fail."""
+    out = []
+    for probe_label, info in results.items():
+        is_ok = info.get("status") == "ok"
+        if is_ok == success:
+            out.extend(_PROBE_TO_TOOLS.get(probe_label, []))
+    return sorted(set(out))
+
+
 # Sentinel objects used by the request pipeline to signal what to do after
 # an HTTP error. Object identity is the comparison key — `is` checks only.
 _RETRY_TRANSIENT = object()
@@ -671,6 +701,108 @@ class ScopusClient:
         return await self._request(
             'GET', endpoint, ttl=self.cache_config['default']
         )
+
+    async def check_capabilities(self) -> Dict[str, Any]:
+        """
+        Probe a small set of representative endpoints to discover what the
+        current API key + insttoken can actually do, without requiring the
+        caller to learn Elsevier's access matrix by trial-and-error.
+
+        Runs 6 lightweight requests (one per endpoint family) and classifies
+        each into: ``ok`` / ``access_controlled`` / ``not_found`` / ``error``.
+        Total cost is ~6 quota units across the various Scopus APIs.
+
+        Caches the result on the client instance so repeated calls within
+        a session are free.
+        """
+        # Memoize: capability state shouldn't change mid-session unless the
+        # user re-authenticates, which would mean restarting the process.
+        if hasattr(self, "_capabilities_cache"):
+            return self._capabilities_cache  # type: ignore[attr-defined]
+
+        # Each probe is (label, async_callable_returning_coroutine, hint).
+        # We use harmless lookups (well-known DOIs, common search terms)
+        # so a "blocked" result almost certainly means access control,
+        # not an empty corpus.
+        probes = [
+            (
+                "scopus_search",
+                lambda: self.search_scopus("TITLE(diabetes)", count=1),
+                "Core Scopus Search API. Should work for any active subscription.",
+            ),
+            (
+                "author_search",
+                lambda: self.search_authors("AUTHLAST(Einstein)", count=1),
+                "Author Search API. Off-campus typically requires SCOPUS_INST_TOKEN.",
+            ),
+            (
+                "abstract_retrieval",
+                lambda: self.get_abstract_by_doi("10.1016/j.jretconser.2019.01.011"),
+                "Abstract Retrieval API. Should work for any subscriber.",
+            ),
+            (
+                "plumx_metrics",
+                lambda: self.get_plumx_metrics("10.1016/j.nicl.2018.10.013", "doi"),
+                "PlumX Metrics. Per Elsevier docs: 'All active Scopus subscriptions include access'.",
+            ),
+            (
+                "citation_overview",
+                lambda: self.get_citations_overview("79955059733"),
+                "Citation Overview API. Officially listed by Elsevier as access-controlled (request via support).",
+            ),
+            (
+                "embase_retrieval",
+                lambda: self.get_embase_record("10.1016/j.jretconser.2019.01.011", "doi"),
+                "Embase is a separate Elsevier product; requires its own subscription.",
+            ),
+        ]
+
+        results: Dict[str, Dict[str, Any]] = {}
+        for label, fn, hint in probes:
+            entry: Dict[str, Any] = {"hint": hint}
+            try:
+                payload = await fn()
+                # Heuristic: 404 path returns {} from _request; treat as not_found
+                if payload == {}:
+                    entry["status"] = "not_found"
+                    entry["detail"] = "Endpoint returned 404 (resource not in Elsevier corpus)."
+                else:
+                    entry["status"] = "ok"
+            except ScopusAccessError as exc:
+                entry["status"] = "access_controlled"
+                # Trim the long error message to just the Scopus statusText line
+                msg = str(exc).split(" | ")
+                entry["detail"] = msg[1] if len(msg) > 1 else msg[0]
+            except Exception as exc:  # network, parse, anything else
+                entry["status"] = "error"
+                entry["detail"] = f"{type(exc).__name__}: {str(exc)[:200]}"
+            results[label] = entry
+
+        # Build a friendly summary for the caller
+        ok_count = sum(1 for r in results.values() if r["status"] == "ok")
+        blocked = [k for k, r in results.items() if r["status"] == "access_controlled"]
+        api_key_present = bool(self.api_key)
+        inst_token_present = bool(self.headers.get("X-ELS-Insttoken"))
+
+        summary = (
+            f"{ok_count}/{len(probes)} probed endpoints accessible. "
+            f"{'Insttoken present' if inst_token_present else 'No insttoken — off-campus access may be limited'}. "
+            f"{'Premium/Embase blocked' if blocked else 'No access-controlled endpoints in this probe set are blocked'}."
+        )
+
+        snapshot = {
+            "auth": {
+                "api_key_present": api_key_present,
+                "inst_token_present": inst_token_present,
+            },
+            "summary": summary,
+            "probes": results,
+            "tools_likely_to_work": _tools_for_probes(results, success=True),
+            "tools_likely_to_fail": _tools_for_probes(results, success=False),
+            "documentation": "https://github.com/oliviercaron/scopus-mcp-extended#endpoint-access-notes",
+        }
+        self._capabilities_cache = snapshot  # type: ignore[attr-defined]
+        return snapshot
 
     async def check_article_access(
         self, value: str, identifier: str = "doi"
