@@ -9,59 +9,61 @@ A comprehensive **Model Context Protocol (MCP)** server for the Elsevier Scopus,
 - **Hardened binary downloads** via `download_object`: SSRF-protected URL validation (canonical `urlparse` checks, no redirect follow, percent-encoded traversal rejected); sandboxed file writes with exclusive-create; streaming with size cap (env-tunable, default 100 MB).
 - **Clear error surfacing**: when Scopus returns 401/403, the tool raises `ScopusAccessError` with the actual Elsevier `statusText` plus actionable hints — no more silent empty responses.
 - **Per-class HTTP cache** with sensible TTLs (search 1 h, abstract 30 d, author 7 d), automatic retry/backoff on 5xx, request quota tracking.
-- **Subscription-tier-aware**: a built-in `check_article_access` tool tells you upfront whether you can full-text a given DOI before bulk downloading.
+- **Access discovery built in**: `check_article_access` and `get_quota_status` let you probe what your specific subscription gives you before bulk operations.
 
 ## Tool inventory (25 total)
 
+Endpoint access depends on your specific Elsevier subscription. See the [Endpoint access notes](#endpoint-access-notes) section below for what worked / didn't work in our development testing.
+
 ### Search
-| Tool | Description | Tier |
-|---|---|---|
-| `search_scopus` | Full-text search of the Scopus index. Supports field-prefix syntax (TITLE-ABS-KEY, AUTH, AFFIL, AU-ID, REFEID...). `view='COMPLETE'` opt-in for full author lists. | Standard |
-| `search_authors` | Search authors by name or affiliation. | Insttoken required |
-| `search_affiliations` | Search institutions. | Insttoken required |
-| `search_journals` | Search journals by title with SJR/SNIP/CiteScore metrics. | Standard |
-| `search_sciencedirect` | Full-text search of ScienceDirect — indexes the article body, not just bibliographic metadata. | Standard |
+| Tool | Description |
+|---|---|
+| `search_scopus` | Full-text search of the Scopus index. Supports field-prefix syntax (TITLE-ABS-KEY, AUTH, AFFIL, AU-ID, REFEID...). `view='COMPLETE'` opt-in for full author lists. |
+| `search_authors` | Search authors by name or affiliation. |
+| `search_affiliations` | Search institutions. |
+| `search_journals` | Search journals by title with SJR/SNIP/CiteScore metrics. |
+| `search_sciencedirect` | Full-text search of ScienceDirect — indexes the article body, not just bibliographic metadata. |
 
 ### Retrieve metadata
-| Tool | Description | Tier |
-|---|---|---|
-| `get_abstract_details` | Bibliographic record + abstract by Scopus ID. | Standard |
-| `get_abstract_by_doi` | Same, by DOI. | Standard |
-| `get_abstract_references` | Reference list (works cited BY this paper). Paginates internally up to `max_refs`. | Standard |
-| `get_author_profile` | Author profile: h-index, citation counts, current affiliation. | Insttoken required |
-| `get_affiliation` | Institution profile by Scopus Affiliation ID. | Insttoken required |
-| `get_journal_by_issn` | Journal metrics (SJR, SNIP, CiteScore) by ISSN. | Standard |
+| Tool | Description |
+|---|---|
+| `get_abstract_details` | Bibliographic record + abstract by Scopus ID. |
+| `get_abstract_by_doi` | Same, by DOI. |
+| `get_abstract_references` | Reference list (works cited BY this paper). Paginates internally up to `max_refs`. |
+| `get_author_profile` | Author profile: h-index, citation counts, current affiliation. |
+| `get_affiliation` | Institution profile by Scopus Affiliation ID. |
+| `get_journal_by_issn` | Journal metrics (SJR, SNIP, CiteScore) by ISSN. |
 
 ### ScienceDirect article access
-| Tool | Description | Tier |
-|---|---|---|
-| `get_article` | Full article from ScienceDirect — `view='META_ABS'` for metadata + abstract, `view='FULL'` for the article body (when entitled). | Standard for META, full text needs entitlement |
-| `get_objects` | List embedded objects of an article: figures, tables, supplementary files, with download URLs in multiple mime types. | Standard |
-| `download_object` | Download a binary object (figure, table image, supplementary file) to a sandboxed local folder. SSRF-protected. | Same as `get_objects` |
-| `check_article_access` | Quickly answer "do I have full-text access to this DOI?" before bulk downloading. Returns ENTITLED / OPEN_ACCESS / NOT_ENTITLED / NOT_FOUND. | Standard |
-| `get_article_entitlement` | Lower-level entitlement check, returns the raw Elsevier response. | Standard |
+| Tool | Description |
+|---|---|
+| `get_article` | Full article from ScienceDirect — `view='META_ABS'` for metadata + abstract, `view='FULL'` for the article body (when entitled). |
+| `get_objects` | List embedded objects of an article: figures, tables, supplementary files, with download URLs in multiple mime types. |
+| `download_object` | Download a binary object (figure, table image, supplementary file) to a sandboxed local folder. SSRF-protected. |
+| `check_article_access` | Quickly answer "do I have full-text access to this DOI?" before bulk downloading. Returns ENTITLED / OPEN_ACCESS / NOT_ENTITLED / NOT_FOUND. |
+| `get_article_entitlement` | Lower-level entitlement check, returns the raw Elsevier response. |
 
 ### Altmetrics
-| Tool | Description | Tier |
-|---|---|---|
-| `get_plumx_metrics` | PlumX altmetrics — Twitter mentions, news, blog posts, downloads, Mendeley readers, citations. Much broader impact picture than just citation counts. | Free for all API keys |
+| Tool | Description |
+|---|---|
+| `get_plumx_metrics` | PlumX altmetrics — Twitter mentions, news, blog posts, downloads, Mendeley readers, citations. Much broader impact picture than just citation counts. |
 
-### Forward citations (often premium tier)
-| Tool | Description | Tier |
-|---|---|---|
-| `get_citing_papers` | Papers that CITE a given paper (uses REFEID query). | Premium tier (often blocked) |
-| `get_citations_overview` | Year-by-year citation history. | Premium tier (often blocked) |
-| `get_citation_count` | Bare citation count for one or more documents (lightweight, batch). | Premium tier (often blocked) |
+### Forward citations
+| Tool | Description |
+|---|---|
+| `get_citing_papers` | Papers that CITE a given paper (uses a REFEID query). |
+| `get_citations_overview` | Year-by-year citation history. |
+| `get_citation_count` | Bare citation count for one or more documents (lightweight, batch). |
 
 ### Holdings & subscription discovery
-| Tool | Description | Tier |
-|---|---|---|
-| `get_holdings_report` | Lists journals your institution is entitled to access. | Premium tier |
+| Tool | Description |
+|---|---|
+| `get_holdings_report` | Lists journals your institution is entitled to access. |
 
 ### Embase
-| Tool | Description | Tier |
-|---|---|---|
-| `get_embase_record` | Retrieve a record from Embase (Elsevier's biomedical and pharmacological database). | Embase subscription (separate from Scopus) |
+| Tool | Description |
+|---|---|
+| `get_embase_record` | Retrieve a record from Embase. |
 
 ### Composition / utility (no new endpoint)
 | Tool | Description |
@@ -75,7 +77,7 @@ A comprehensive **Model Context Protocol (MCP)** server for the Elsevier Scopus,
 ### 1. Get an Elsevier API key (and optionally an Insttoken)
 
 1. Apply at the [Elsevier Developer Portal](https://dev.elsevier.com/) using your institutional email (free public emails are usually rejected).
-2. **Strongly recommended**: also request an *Institutional Token* from Elsevier support. Without it, several endpoints are restricted to requests originating from your institution's IP range. With it, you get the same access from anywhere. See the [Insttoken docs](https://dev.elsevier.com/tecdoc_api_authentication.html) — institutional admins can generate one via the dev portal, or you can email Elsevier support directly explaining your use case.
+2. **Strongly recommended**: also request an *Institutional Token* from Elsevier support. From [Elsevier's auth doc](https://dev.elsevier.com/tecdoc_api_authentication.html): *"An insttoken is an additional security token submitted in tandem with your APIKey. […] The insttoken represents full access to a customer account within our authentication and entitlements system."* In our development testing, several endpoints (Author Search, Affiliation Search, Author/Affiliation Retrieval) returned 401 without the insttoken and 200 with it — your mileage may vary. Insttokens are issued by Elsevier support to existing institutional subscribers; ask your library or contact Elsevier directly.
 
 ### 2. Install
 
@@ -240,22 +242,46 @@ What does the journal landscape look like?
 → get_journal_by_issn(issn="...") for SJR/SNIP/CiteScore
 ```
 
-## Subscription tier matrix
+## Endpoint access notes
 
-The Elsevier API portfolio has multiple tiers. Most institutions have the **Standard** tier; the Premium tier and Embase are separate add-ons that many subscriptions don't include. This MCP works on whatever tier you have — endpoints you don't have access to will raise `ScopusAccessError` with a clear message rather than silently returning empty.
+### What Elsevier officially documents
 
-| Endpoint group | Standard | Premium | Embase |
-|---|:---:|:---:|:---:|
-| Search (Scopus, Authors, Affiliations, Journals) | ✅ | ✅ | ✅ |
-| Retrieve (Abstract, Author, Affiliation) | ✅ | ✅ | ✅ |
-| ScienceDirect (Article Retrieval, Objects, Search) | ✅ | ✅ | ✅ |
-| PlumX | ✅ | ✅ | ✅ |
-| `view=ENTITLED` checks | ✅ | ✅ | ✅ |
-| Holdings Report | ❌ | ✅ | ❌ |
-| REFEID forward citations | ❌ | ✅ | ❌ |
-| Citations Overview (year-by-year) | ❌ | ✅ | ❌ |
-| Citation Count (lightweight batch) | ❌ | ✅ | ❌ |
-| Embase Article Retrieval | ❌ | ❌ | ✅ |
+The [Elsevier Developer Portal](https://dev.elsevier.com/api_docs.html) lists every API but **does not publish a per-endpoint subscription matrix**. The only access notes published are:
+
+- A general statement: *"Some VIEWs are restricted based on subscription status to an Elsevier product."*
+- About the institutional token (verbatim from [Elsevier's auth doc](https://dev.elsevier.com/tecdoc_api_authentication.html)):
+  > *"An insttoken is an additional security token submitted in tandem with your APIKey. […] The insttoken represents full access to a customer account within our authentication and entitlements system."*
+- [Embase](https://www.elsevier.com/products/embase) is officially a **separate product** with its own subscription tiers; having Scopus access does not imply having Embase access.
+
+### What we observed during development
+
+These are the empirical results from testing every tool with one specific institutional API key + insttoken (Université Paris-Dauphine subscription). **Your access will differ** depending on what your institution subscribes to.
+
+| Tool / endpoint | Result with our test key |
+|---|---|
+| `search_scopus` (basic queries: TITLE-ABS-KEY, AUTH, AU-ID, AFFIL, etc.) | ✅ 200 OK |
+| `search_scopus` with `REFEID(...)` (forward-citation field) | ❌ 400 — *"Use of certain field restrictions in the search query is not allowed for this requestor"* |
+| `search_authors`, `search_affiliations`, `get_author_profile`, `get_affiliation` | ✅ 200 OK (with insttoken) |
+| `search_journals`, `get_journal_by_issn` | ✅ 200 OK |
+| `get_abstract_details`, `get_abstract_by_doi`, `get_abstract_references` | ✅ 200 OK |
+| `search_sciencedirect` | ✅ 200 OK |
+| `get_article` (`view=META_ABS` and `view=FULL`) | ✅ 200 OK — full article body delivered when entitled |
+| `get_objects`, `download_object` | ✅ 200/300 OK — figures and supplementary files downloadable |
+| `check_article_access` (uses `view=ENTITLED`) | ✅ 200 OK — returns `ENTITLED` / `OPEN_ACCESS` / `NOT_FOUND` |
+| `get_plumx_metrics` | ✅ 200 OK |
+| `get_quota_status` | ✅ Always works (reads cached headers) |
+| `get_article_entitlement` (raw entitlement endpoint) | ❌ 403 — *"Requestor configuration settings insufficient for access to this resource"* |
+| `get_citations_overview` | ❌ 403 (same message) |
+| `get_citation_count` | ❌ 403 (same message) |
+| `get_holdings_report` | ❌ 403 (same message) |
+| `get_embase_record` | ❌ 403 (same message — Embase is a separate Elsevier product) |
+| `get_citing_papers` (depends on REFEID) | ❌ 400 (same as REFEID above) |
+
+### Practical advice
+
+- **Try a tool to discover access**: any 401/403 raises `ScopusAccessError` with Elsevier's own status text, so you know immediately whether the issue is your key, your insttoken, or your subscription tier.
+- **Use `check_article_access(doi)` before bulk full-text downloads** — it's the cheapest way to filter a list of DOIs to those you can actually retrieve.
+- **An institutional token (`SCOPUS_INST_TOKEN`) helps a lot**: it unlocked the Author/Affiliation/ScienceDirect endpoints from off-campus in our testing, where they otherwise returned 401. Request one from Elsevier support.
 
 ## License
 
