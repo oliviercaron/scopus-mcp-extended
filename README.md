@@ -7,7 +7,7 @@ A comprehensive **Model Context Protocol (MCP)** server for the Elsevier Scopus,
 - **25 tools** spanning Scopus Search, Author/Affiliation APIs, ScienceDirect Article Retrieval, PlumX altmetrics, Embase, Holdings — and convenience composers (BibTeX export, co-author networks).
 - **Institutional token (`X-ELS-Insttoken`) support** out of the box. Required by Elsevier for off-campus access to Author Search, Affiliation APIs, Article Retrieval, etc.
 - **Hardened binary downloads** via `download_object`: SSRF-protected URL validation (canonical `urlparse` checks, no redirect follow, percent-encoded traversal rejected); sandboxed file writes with exclusive-create; streaming with size cap (env-tunable, default 100 MB).
-- **Clear error surfacing**: when Scopus returns 401/403, the tool raises `ScopusAccessError` with the actual Elsevier `statusText` plus actionable hints — no more silent empty responses.
+- **Clear error surfacing**: when Scopus returns 401, the tool raises `ScopusAuthError` (credentials not recognized — typically off-campus + no insttoken); 403 raises `ScopusSubscriptionError` (credentials valid, resource not in your contract). Both subclass `ScopusAccessError` so existing catches still work. The actual Elsevier `statusCode` + `statusText` are exposed both in the message and as structured attributes on the exception.
 - **Per-class HTTP cache** with sensible TTLs (search 1 h, abstract 30 d, author 7 d), automatic retry/backoff on 5xx, request quota tracking.
 - **Access discovery built in**: `check_article_access` and `get_quota_status` let you probe what your specific subscription gives you before bulk operations.
 
@@ -312,7 +312,7 @@ Empirical results from testing every tool with one specific institutional API ke
 
 ### Practical advice
 
-- **Probe access by trying a tool**. Any 401/403/400 raises `ScopusAccessError` with Elsevier's exact `statusCode` + `statusText`, so you know whether you're hitting authentication, entitlement, or a missing subscription.
+- **Probe access by trying a tool**. HTTP 401 raises `ScopusAuthError` (credentials not recognized — likely missing insttoken); HTTP 403 raises `ScopusSubscriptionError` (resource not in your subscription, must be enabled per-key by Elsevier support). HTTP 400 (e.g. on `REFEID(...)` queries) propagates the raw `httpx.HTTPStatusError` because the field-level access control surfaces as INVALID_INPUT rather than 401/403. All three carry the Elsevier `statusCode` + `statusText` for diagnostics.
 - **Use `check_article_access(doi)` before bulk full-text downloads** — it's the cheapest way to filter a DOI list to what you can actually retrieve.
 - **Request an insttoken from Elsevier support** if you'll work off-campus. In our tests, Author/Affiliation/Article Retrieval APIs returned 401 without it and 200 with it.
 - **Need a normally access-controlled API?** Email Elsevier support with your API Key + use case. Per the Scopus API Guide: *"Please note that our policy is to enable special access on only one API Key per project. Quotas are then adjusted accordingly to meet the needs of that project."*

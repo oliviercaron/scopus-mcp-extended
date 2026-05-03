@@ -90,6 +90,115 @@ def _tools_for_probes(results: Dict[str, Dict[str, Any]], success: bool) -> list
     return sorted(set(out))
 
 
+def _count_statuses(results: Dict[str, Dict[str, Any]]) -> Dict[str, int]:
+    """Bucket-count probe results by their ``status`` field."""
+    counts = {"ok": 0, "auth_failed": 0, "access_controlled": 0,
+              "not_found": 0, "error": 0}
+    for info in results.values():
+        status = info.get("status", "error")
+        counts[status] = counts.get(status, 0) + 1
+    return counts
+
+
+def _build_summary(results: Dict[str, Dict[str, Any]], inst_token_present: bool) -> str:
+    """Compose the one-line summary shown to the caller.
+
+    The wording adapts to the dominant failure mode so the user reads the
+    most relevant cause first.
+    """
+    counts = _count_statuses(results)
+    total = sum(counts.values())
+    parts = [f"{counts['ok']}/{total} probed endpoints accessible."]
+    if counts["auth_failed"]:
+        parts.append(
+            f"{counts['auth_failed']} blocked by authentication "
+            "(HTTP 401 — credentials not recognized as a subscriber)."
+        )
+    if counts["access_controlled"]:
+        parts.append(
+            f"{counts['access_controlled']} blocked by subscription "
+            "(HTTP 403 — credentials valid but resource not in your contract)."
+        )
+    parts.append(
+        "Insttoken " + ("present" if inst_token_present else "absent") + "."
+    )
+    return " ".join(parts)
+
+
+def _build_advice(results: Dict[str, Dict[str, Any]], inst_token_present: bool) -> list:
+    """Produce a short list of actionable suggestions ordered by impact.
+
+    The dominant failure mode determines the first piece of advice — a user
+    seeing mostly 401s needs different guidance from a user seeing mostly
+    403s. Always returns at least one entry so callers never get an empty
+    list.
+    """
+    counts = _count_statuses(results)
+    advice: list = []
+
+    auth = counts["auth_failed"]
+    sub  = counts["access_controlled"]
+
+    if auth > 0:
+        # Pick the wording based on which failure mode dominates:
+        # - auth strictly dominates → call out 401 specifically
+        # - tie auth == sub → mention both fairly, no false attribution
+        # - otherwise (sub dominates) we'll still mention auth below
+        if auth > sub:
+            preface = "Most failures are HTTP 401 (authentication)."
+        elif auth == sub:
+            preface = (
+                f"Authentication and subscription failures occur in equal "
+                f"numbers ({auth} each)."
+            )
+        else:
+            preface = f"Some failures ({auth}) are HTTP 401 (authentication)."
+
+        if not inst_token_present:
+            advice.append(
+                f"{preface} You are most likely off-campus and don't have a "
+                "SCOPUS_INST_TOKEN set. Request an institutional token from "
+                "Elsevier support and set it via SCOPUS_INST_TOKEN env var "
+                "or config.json."
+            )
+        else:
+            advice.append(
+                f"{preface} An insttoken is set, so the most likely cause "
+                "is a mismatch (verify the insttoken belongs to the same "
+                "institution as your API key and that both are still active)."
+            )
+
+    if sub > 0:
+        advice.append(
+            f"{sub} endpoint(s) are officially access-controlled per Elsevier "
+            "(Citation Overview, Holdings Report, Embase, …) and must be "
+            "enabled per-key by Elsevier support. See "
+            "https://dev.elsevier.com/api_key_settings.html"
+        )
+
+    if counts["error"] > 0:
+        advice.append(
+            f"{counts['error']} probe(s) failed for non-Scopus reasons "
+            "(network, parse, …). Check the per-probe `detail` field."
+        )
+
+    if counts["ok"] == sum(counts.values()):
+        advice.append(
+            "All probes passed. Your credentials cover the most useful "
+            "Scopus + ScienceDirect + PlumX endpoints."
+        )
+
+    # Fallback so the list is never empty (e.g. all-not_found scenario, or
+    # a future status enum we haven't anticipated).
+    if not advice:
+        advice.append(
+            "No actionable issue identified from the probe set. "
+            "Review the per-probe `status` and `detail` fields for context."
+        )
+
+    return advice
+
+
 # Sentinel objects used by the request pipeline to signal what to do after
 # an HTTP error. Object identity is the comparison key — `is` checks only.
 _RETRY_TRANSIENT = object()
@@ -113,18 +222,60 @@ class _RetryRequest(Exception):
 
 
 class ScopusAccessError(Exception):
-    """Raised when Scopus refuses access to an endpoint (HTTP 401 or 403).
+    """Base class — raised when Scopus refuses access to an endpoint.
 
-    Common causes:
-      * Missing or invalid API key (see SCOPUS_API_KEY).
-      * Missing or invalid institutional token (see SCOPUS_INST_TOKEN /
-        X-ELS-Insttoken header).
-      * Your institution's Scopus subscription tier does not include this
-        specific endpoint. For example, REFEID queries (forward citations)
-        and the Citations Overview API are premium add-ons that many
-        institutional subscriptions do not bundle.
-      * Endpoint requires institutional network access (try via VPN / library
-        proxy).
+    Catch this if you don't care about the HTTP-level distinction between
+    auth (401) and subscription (403) failures. For more granular handling,
+    catch one of the two subclasses below.
+
+    Attributes:
+        http_status: int, the HTTP status that triggered the error (401, 403…).
+        scopus_status_code: str, Elsevier's own statusCode (e.g.
+            ``AUTHENTICATION_ERROR``, ``AUTHORIZATION_ERROR``,
+            ``INVALID_INPUT``). Empty string if not present in the response.
+        scopus_status_text: str, Elsevier's human-readable explanation. Empty
+            string if not present.
+    """
+    def __init__(self, message: str, *, http_status: int = 0,
+                 scopus_status_code: str = "", scopus_status_text: str = ""):
+        super().__init__(message)
+        self.http_status = http_status
+        self.scopus_status_code = scopus_status_code
+        self.scopus_status_text = scopus_status_text
+
+
+class ScopusAuthError(ScopusAccessError):
+    """HTTP 401 — Elsevier did not recognize your authentication context.
+
+    Typical causes:
+      * The API key is invalid or expired.
+      * The request comes from outside the institution's IP range AND no
+        valid SCOPUS_INST_TOKEN was provided.
+      * The combination (API key + insttoken) is mismatched (insttoken
+        belongs to a different key).
+
+    Distinct from ``ScopusSubscriptionError`` (HTTP 403): a 401 means
+    Elsevier cannot identify *who* you are; a 403 means it knows you but
+    your subscription does not cover this resource.
+    """
+    pass
+
+
+class ScopusSubscriptionError(ScopusAccessError):
+    """HTTP 403 — Elsevier authenticated you but your subscription does
+    not include this resource.
+
+    Typical causes:
+      * The endpoint is officially access-controlled and must be enabled
+        per-key by Elsevier support (e.g. Citation Overview, Holdings
+        Report, Embase).
+      * The institution does not subscribe to the underlying product
+        (e.g. Embase requires a separate subscription from Scopus).
+      * A field/view inside the endpoint is gated even though the endpoint
+        itself is open (e.g. DOCUMENTS view of Author Retrieval).
+
+    Distinct from ``ScopusAuthError`` (HTTP 401): your credentials are
+    valid, the resource just isn't part of your contract.
     """
     pass
 
@@ -332,18 +483,39 @@ class ScopusClient:
                 msg_parts.append(
                     f"Scopus error: {scopus_code} - {scopus_text}".strip(" -")
                 )
-            msg_parts.append(
-                "Likely causes: (1) missing or invalid API key / "
-                "institutional token; (2) your Scopus subscription "
-                "tier does not include this endpoint — REFEID queries "
-                "and the Citations Overview API are premium add-ons "
-                "many institutions do not have; (3) the endpoint "
-                "requires institutional network access (try via VPN / "
-                "library proxy)."
-            )
+
+            # Pick the right subclass + the right hint depending on whether
+            # this is an authentication failure (401, the request couldn't be
+            # tied to a subscriber) or a subscription failure (403, the
+            # request was authenticated but the resource isn't covered).
+            if status == 401:
+                msg_parts.append(
+                    "HTTP 401 means Elsevier could not authenticate the "
+                    "request. Likely fixes: (1) verify SCOPUS_API_KEY is "
+                    "valid; (2) if you're off-campus, request a SCOPUS_INST_TOKEN "
+                    "from Elsevier support and set it; (3) ensure the API "
+                    "key and insttoken belong to the same institution."
+                )
+                exc_class: type[ScopusAccessError] = ScopusAuthError
+            else:  # 403
+                msg_parts.append(
+                    "HTTP 403 means your credentials are valid but your "
+                    "subscription does not cover this resource. Many APIs "
+                    "(Citation Overview, Holdings Report, Embase, …) are "
+                    "officially access-controlled per Elsevier's docs and "
+                    "must be enabled per-key by Elsevier support. See: "
+                    "https://dev.elsevier.com/api_key_settings.html"
+                )
+                exc_class = ScopusSubscriptionError
+
             full_msg = " | ".join(msg_parts)
             logger.warning(full_msg)
-            raise ScopusAccessError(full_msg)
+            raise exc_class(
+                full_msg,
+                http_status=status,
+                scopus_status_code=scopus_code,
+                scopus_status_text=scopus_text,
+            )
         if status == 404:
             logger.info("Resource not found: %s", url)
             return _GIVE_UP_EMPTY
@@ -709,7 +881,16 @@ class ScopusClient:
         caller to learn Elsevier's access matrix by trial-and-error.
 
         Runs 6 lightweight requests (one per endpoint family) and classifies
-        each into: ``ok`` / ``access_controlled`` / ``not_found`` / ``error``.
+        each into one of:
+          * ``ok`` — the endpoint returned data
+          * ``auth_failed`` — HTTP 401, your credentials are not recognized
+            as a subscriber (typically: off-campus + no insttoken set)
+          * ``access_controlled`` — HTTP 403, credentials valid but the
+            resource is not in your subscription (e.g. Citation Overview,
+            Holdings, Embase — must be enabled per-key by Elsevier support)
+          * ``not_found`` — HTTP 404, the probe identifier doesn't exist
+          * ``error`` — anything else (network, parse error, …)
+
         Total cost is ~6 quota units across the various Scopus APIs.
 
         Caches the result on the client instance so repeated calls within
@@ -768,34 +949,45 @@ class ScopusClient:
                     entry["detail"] = "Endpoint returned 404 (resource not in Elsevier corpus)."
                 else:
                     entry["status"] = "ok"
-            except ScopusAccessError as exc:
+            except ScopusAuthError as exc:
+                # 401 — credentials don't identify a subscriber. Different
+                # actionable advice from a 403, hence a separate bucket.
+                entry["status"] = "auth_failed"
+                entry["http_status"] = 401
+                entry["detail"] = (
+                    f"{exc.scopus_status_code} - {exc.scopus_status_text}".strip(" -")
+                    or "HTTP 401 Unauthorized (no actionable Elsevier statusText)"
+                )
+            except ScopusSubscriptionError as exc:
+                # 403 — credentials valid, subscription excludes this resource.
                 entry["status"] = "access_controlled"
-                # Trim the long error message to just the Scopus statusText line
-                msg = str(exc).split(" | ")
-                entry["detail"] = msg[1] if len(msg) > 1 else msg[0]
+                entry["http_status"] = 403
+                entry["detail"] = (
+                    f"{exc.scopus_status_code} - {exc.scopus_status_text}".strip(" -")
+                    or "HTTP 403 Forbidden (no actionable Elsevier statusText)"
+                )
+            except ScopusAccessError as exc:
+                # Defensive: any future ScopusAccessError subclass we haven't
+                # listed above. Falls into a generic bucket so behaviour stays
+                # informative even if the exception hierarchy grows.
+                entry["status"] = "access_controlled"
+                entry["http_status"] = exc.http_status
+                entry["detail"] = str(exc).split(" | ")[1] if " | " in str(exc) else str(exc)[:200]
             except Exception as exc:  # network, parse, anything else
                 entry["status"] = "error"
                 entry["detail"] = f"{type(exc).__name__}: {str(exc)[:200]}"
             results[label] = entry
 
-        # Build a friendly summary for the caller
-        ok_count = sum(1 for r in results.values() if r["status"] == "ok")
-        blocked = [k for k, r in results.items() if r["status"] == "access_controlled"]
+        # Build a friendly summary tailored to the failure mix observed.
         api_key_present = bool(self.api_key)
         inst_token_present = bool(self.headers.get("X-ELS-Insttoken"))
-
-        summary = (
-            f"{ok_count}/{len(probes)} probed endpoints accessible. "
-            f"{'Insttoken present' if inst_token_present else 'No insttoken — off-campus access may be limited'}. "
-            f"{'Premium/Embase blocked' if blocked else 'No access-controlled endpoints in this probe set are blocked'}."
-        )
-
         snapshot = {
             "auth": {
                 "api_key_present": api_key_present,
                 "inst_token_present": inst_token_present,
             },
-            "summary": summary,
+            "summary": _build_summary(results, inst_token_present),
+            "advice": _build_advice(results, inst_token_present),
             "probes": results,
             "tools_likely_to_work": _tools_for_probes(results, success=True),
             "tools_likely_to_fail": _tools_for_probes(results, success=False),
@@ -1109,7 +1301,22 @@ class ScopusClient:
                     f"to override."
                 )
 
-            response.raise_for_status()
+            # Route 4xx through the shared status-error normalizer so 401/403
+            # raise ScopusAuthError / ScopusSubscriptionError consistently
+            # with the JSON-API path. Without this, callers of download_object
+            # would see a raw httpx.HTTPStatusError on 401/403, breaking
+            # `except ScopusAccessError` in user code.
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as http_err:
+                # _handle_status_error returns a sentinel (retry/give-up) or
+                # raises one of our subclasses. For download_object we don't
+                # want to retry/give-up silently — so we bubble up regardless,
+                # but the call ensures the right subclass is raised first.
+                self._handle_status_error(http_err, str(response.url))
+                # If it returned a sentinel (e.g. 404) instead of raising,
+                # surface that explicitly rather than continuing to read body.
+                raise
 
             total = 0
             try:
