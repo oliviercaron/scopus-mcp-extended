@@ -244,44 +244,96 @@ What does the journal landscape look like?
 
 ## Endpoint access notes
 
-### What Elsevier officially documents
+Elsevier organises access in three layers, each documented in different places:
 
-The [Elsevier Developer Portal](https://dev.elsevier.com/api_docs.html) lists every API but **does not publish a per-endpoint subscription matrix**. The only access notes published are:
+### Layer 1 — The institutional token (`X-ELS-Insttoken`)
 
-- A general statement: *"Some VIEWs are restricted based on subscription status to an Elsevier product."*
-- About the institutional token (verbatim from [Elsevier's auth doc](https://dev.elsevier.com/tecdoc_api_authentication.html)):
-  > *"An insttoken is an additional security token submitted in tandem with your APIKey. […] The insttoken represents full access to a customer account within our authentication and entitlements system."*
-- [Embase](https://www.elsevier.com/products/embase) is officially a **separate product** with its own subscription tiers; having Scopus access does not imply having Embase access.
+Verbatim from the [Scopus API Getting Started Guide v1, Sept 2023](https://dev.elsevier.com/guides/Scopus%20API%20Guide_V1_20230907.pdf), section 2.2:
+
+> *"An institutional token, or insttoken, is an additional security token submitted in tandem with your API Key. Insttokens are only available for customers or partners working on behalf of a customer that cannot use IP authentication to access the Scopus APIs and thus, must be enabled manually by an Elsevier representative to use an API Key. An institutional token gives full access to the customer account within Elsevier authentication and entitlements system."*
+
+Translation: with an insttoken you behave as if you were on your institution's IP range, anywhere. It is the recommended setup for off-campus development.
+
+### Layer 2 — Access-controlled APIs / fields / views (Scopus)
+
+Verbatim from the same guide, section 2.3:
+
+> *"Access-controlled Scopus APIs and permissions that are available only upon request include:*
+> - *Citation Overview API*
+> - *refEID field*
+> - *Index Keyword field*
+> - *DOCUMENTS view of the Affiliation Retrieval and Author Retrieval APIs"*
+
+This explains the two distinct error patterns you may hit:
+- A whole API that's access-controlled returns **HTTP 403** with statusText *"Requestor configuration settings insufficient for access to this resource"* (e.g. Citation Overview).
+- A field that's access-controlled inside an otherwise-allowed API returns **HTTP 400 INVALID_INPUT** with *"Use of certain field restrictions in the search query is not allowed for this requestor"* (this is what `REFEID(...)` queries trigger — the Search API endpoint is open, but the field is gated).
+
+The same Elsevier page on [Default API Key Settings](https://dev.elsevier.com/api_key_settings.html) lists a broader cross-product set of access-controlled APIs:
+
+> *"The access-controlled APIs include: Scopus Citation Overview, Scopus Author Feedback, ScienceDirect Full-Text Entitlement, ScienceDirect Article Hosting Permissions, ScienceDirect Holdings Report, Embase Search and Retrieval, Engineering Village Search and Retrieval, Pharmapendium API, SUSHI COP5 API."*
+
+> *"Additionally, access to specialized APIs is not enabled by default, as use cases for specialized APIs require review from Elsevier's API Support team."*
+
+To get any of these enabled, contact Elsevier support with your API Key + use case.
+
+### Layer 3 — Product subscription (Scopus, ScienceDirect, Embase, …)
+
+Even APIs that are not access-controlled require your institution to be subscribed to the relevant Elsevier product. From [dev.elsevier.com/about.html](https://dev.elsevier.com/about.html):
+
+> *"Furthermore, full API access is only granted to clients that run within the networks of organizations that have subscriptions to the corresponding Elsevier product. Clients without subscriptions have access to limited basic metadata for most publications and citation records, as well as to basic search functionality."*
+
+In particular:
+- **PlumX Metrics** is bundled with Scopus, per the Scopus API Guide v1 section 12: *"All active Scopus subscriptions include access to the PlumX Metrics API"*.
+- **Embase** is a [separate Elsevier product](https://www.elsevier.com/products/embase) with its own subscription tiers — having Scopus does NOT give you Embase.
+- **ScienceDirect** is a separate product. Article Retrieval `view=FULL` requires the institution to be entitled to the specific article (Elsevier's standard publishing entitlement model).
 
 ### What we observed during development
 
-These are the empirical results from testing every tool with one specific institutional API key + insttoken (Université Paris-Dauphine subscription). **Your access will differ** depending on what your institution subscribes to.
+Empirical results from testing every tool with one specific institutional API key + insttoken (Université Paris-Dauphine subscription, an academic Scopus + ScienceDirect subscriber). **Your access will differ** depending on your institution.
 
-| Tool / endpoint | Result with our test key |
-|---|---|
-| `search_scopus` (basic queries: TITLE-ABS-KEY, AUTH, AU-ID, AFFIL, etc.) | ✅ 200 OK |
-| `search_scopus` with `REFEID(...)` (forward-citation field) | ❌ 400 — *"Use of certain field restrictions in the search query is not allowed for this requestor"* |
-| `search_authors`, `search_affiliations`, `get_author_profile`, `get_affiliation` | ✅ 200 OK (with insttoken) |
-| `search_journals`, `get_journal_by_issn` | ✅ 200 OK |
-| `get_abstract_details`, `get_abstract_by_doi`, `get_abstract_references` | ✅ 200 OK |
-| `search_sciencedirect` | ✅ 200 OK |
-| `get_article` (`view=META_ABS` and `view=FULL`) | ✅ 200 OK — full article body delivered when entitled |
-| `get_objects`, `download_object` | ✅ 200/300 OK — figures and supplementary files downloadable |
-| `check_article_access` (uses `view=ENTITLED`) | ✅ 200 OK — returns `ENTITLED` / `OPEN_ACCESS` / `NOT_FOUND` |
-| `get_plumx_metrics` | ✅ 200 OK |
-| `get_quota_status` | ✅ Always works (reads cached headers) |
-| `get_article_entitlement` (raw entitlement endpoint) | ❌ 403 — *"Requestor configuration settings insufficient for access to this resource"* |
-| `get_citations_overview` | ❌ 403 (same message) |
-| `get_citation_count` | ❌ 403 (same message) |
-| `get_holdings_report` | ❌ 403 (same message) |
-| `get_embase_record` | ❌ 403 (same message — Embase is a separate Elsevier product) |
-| `get_citing_papers` (depends on REFEID) | ❌ 400 (same as REFEID above) |
+| Tool / endpoint | Result | Explained by |
+|---|---|---|
+| `search_scopus` (TITLE-ABS-KEY, AUTH, AU-ID, AFFIL, …) | ✅ 200 | Standard Scopus subscription |
+| `search_scopus` with `REFEID(...)` | ❌ 400 INVALID_INPUT | `refEID field` is access-controlled (Layer 2) |
+| `search_authors`, `search_affiliations` | ✅ 200 | Insttoken provides the institutional context |
+| `get_author_profile`, `get_affiliation` | ✅ 200 | Same |
+| `search_journals`, `get_journal_by_issn` | ✅ 200 | Serial Title API — Scopus standard |
+| `get_abstract_details`, `get_abstract_by_doi`, `get_abstract_references` | ✅ 200 | Abstract Retrieval — Scopus standard |
+| `search_sciencedirect`, `get_article`, `get_objects`, `download_object` | ✅ 200/300 | ScienceDirect subscription |
+| `check_article_access` (uses `view=ENTITLED` on Article Retrieval) | ✅ 200 | View available within Article Retrieval |
+| `get_plumx_metrics` | ✅ 200 | Bundled with active Scopus subscriptions |
+| `get_quota_status` | ✅ Always | Reads cached `X-RateLimit-*` headers |
+| `get_citations_overview` | ❌ 403 AUTHENTICATION_ERROR | Citation Overview API is access-controlled (Layer 2) |
+| `get_citation_count` | ❌ 403 (same) | Falls under access-controlled Scopus APIs in our subscription |
+| `get_article_entitlement` (raw endpoint, not the view) | ❌ 403 (same) | "ScienceDirect Full-Text Entitlement" is access-controlled (Layer 2) |
+| `get_holdings_report` | ❌ 403 (same) | "ScienceDirect Holdings Report" is access-controlled (Layer 2) |
+| `get_embase_record` | ❌ 403 (same) | Embase is a separate product (Layer 3) — Dauphine has no Embase subscription |
+| `get_citing_papers` | ❌ 400 (same as REFEID) | Composes `REFEID(...)` query, gated by access-controlled field |
 
 ### Practical advice
 
-- **Try a tool to discover access**: any 401/403 raises `ScopusAccessError` with Elsevier's own status text, so you know immediately whether the issue is your key, your insttoken, or your subscription tier.
-- **Use `check_article_access(doi)` before bulk full-text downloads** — it's the cheapest way to filter a list of DOIs to those you can actually retrieve.
-- **An institutional token (`SCOPUS_INST_TOKEN`) helps a lot**: it unlocked the Author/Affiliation/ScienceDirect endpoints from off-campus in our testing, where they otherwise returned 401. Request one from Elsevier support.
+- **Probe access by trying a tool**. Any 401/403/400 raises `ScopusAccessError` with Elsevier's exact `statusCode` + `statusText`, so you know whether you're hitting authentication, entitlement, or a missing subscription.
+- **Use `check_article_access(doi)` before bulk full-text downloads** — it's the cheapest way to filter a DOI list to what you can actually retrieve.
+- **Request an insttoken from Elsevier support** if you'll work off-campus. In our tests, Author/Affiliation/Article Retrieval APIs returned 401 without it and 200 with it.
+- **Need a normally access-controlled API?** Email Elsevier support with your API Key + use case. Per the Scopus API Guide: *"Please note that our policy is to enable special access on only one API Key per project. Quotas are then adjusted accordingly to meet the needs of that project."*
+
+### Default rate limits (from the official Scopus API Guide v1, Sept 2023)
+
+The Scopus APIs have per-key throttling levels (Development / Low / Medium / High) and weekly quotas. Defaults from page 11:
+
+| API | Throttle (req/s) Dev / Low / Med / High | Weekly quota |
+|---|:---:|:---:|
+| Abstract Retrieval | 9 / 9 / 12 / 15 | 10,000 |
+| Abstract Citation Count | 15 / 15 / 20 / 20 | 20,000 |
+| Serial Title | 6 / 6 / 9 / 12 | 20,000 |
+| Subject Classifications | N/A | N/A |
+| Affiliation Retrieval | 9 / 9 / 12 / 15 | 5,000 |
+| Author Retrieval | 6 / 6 / 9 / 12 | 5,000 |
+| Affiliation Search | 6 / 6 / 9 / 12 | 5,000 |
+| Author Search | 6 / 6 / 9 / 12 | 5,000 |
+| Scopus Search | 9 / 9 / 12 / 15 | 20,000 |
+
+`get_quota_status` returns the live values from the `X-RateLimit-*` response headers.
 
 ## License
 
